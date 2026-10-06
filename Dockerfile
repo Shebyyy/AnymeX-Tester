@@ -1,8 +1,8 @@
 ﻿FROM python:3.11-slim
 
-# Install OpenJDK 17 and curl/unzip
+# Install default headless JRE, curl, and unzip
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jre-headless \
+    default-jre-headless \
     curl \
     unzip \
     && rm -rf /var/lib/apt/lists/*
