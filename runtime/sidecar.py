@@ -1,9 +1,10 @@
 import asyncio
+import collections
 import json
 import logging
 import os
 import subprocess
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("SidecarBridge")
 
@@ -25,11 +26,15 @@ class SidecarBridge:
         self._is_ready = False
         self._read_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
+        self._recent_logs: collections.deque = collections.deque(maxlen=150)
         self._initialized = True
 
     @property
     def is_running(self) -> bool:
         return self.process is not None and self.process.returncode is None and self._is_ready
+
+    def get_recent_logs(self, count: int = 15) -> List[str]:
+        return list(self._recent_logs)[-count:]
 
     async def start(self) -> bool:
         if self.is_running:
@@ -95,10 +100,15 @@ class SidecarBridge:
                         future = self._pending_requests.pop(req_id)
                         if not future.done():
                             if status == "error":
-                                future.set_exception(RuntimeError(data or "Unknown sidecar error"))
+                                recent = self.get_recent_logs(8)
+                                err_details = str(data or "Unknown sidecar error")
+                                if recent:
+                                    err_details += "\n" + "\n".join(recent[-5:])
+                                future.set_exception(RuntimeError(err_details))
                             else:
                                 future.set_result(data)
                 except json.JSONDecodeError:
+                    self._recent_logs.append(f"[OUT] {line}")
                     logger.debug(f"[Sidecar Raw Out] {line}")
             except Exception as e:
                 logger.error(f"Error in stdout loop: {e}")
@@ -114,6 +124,7 @@ class SidecarBridge:
                 if not line:
                     continue
 
+                self._recent_logs.append(line)
                 logger.debug(f"[Sidecar Log] {line}")
                 if "AnymeX Sidecar Process Started" in line or "Started" in line:
                     ready_event.set()
@@ -151,7 +162,11 @@ class SidecarBridge:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending_requests.pop(req_id, None)
-            raise TimeoutError(f"Method '{method}' timed out after {timeout}s")
+            recent = self.get_recent_logs(8)
+            err_msg = f"JAR method '{method}' timed out after {timeout}s"
+            if recent:
+                err_msg += "\n" + "\n".join(recent[-4:])
+            raise TimeoutError(err_msg)
 
     def stop(self):
         self._is_ready = False

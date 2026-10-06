@@ -9,6 +9,14 @@ BACKEND_ICONS = {
     "mangayomi": "https://raw.githubusercontent.com/kodjodevf/mangayomi/main/assets/app_icons/icon-red.png",
 }
 
+def _format_error(err: str, max_len: int = 400) -> str:
+    if not err:
+        return "Unknown error"
+    clean = err.strip()
+    if len(clean) > max_len:
+        clean = clean[:max_len] + "... (truncated)"
+    return f"```yaml\n{clean}\n```"
+
 def create_test_report_embed(report: TestReport) -> discord.Embed:
     status_emoji = "🟢" if report.overall_passed else "🔴"
     status_text = "PASSED" if report.overall_passed else "FAILED"
@@ -24,7 +32,7 @@ def create_test_report_embed(report: TestReport) -> discord.Embed:
     if report.search_step:
         step = report.search_step
         icon = "✅" if step.passed else "❌"
-        value = f"{step.info}" if step.passed else f"⚠️ **Error:** `{step.error}`"
+        value = f"{step.info}" if step.passed else f"⚠️ **Failed:**\n{_format_error(step.error)}"
         embed.add_field(
             name=f"{icon} Step 1: Search ({step.duration_ms}ms)",
             value=value,
@@ -35,7 +43,7 @@ def create_test_report_embed(report: TestReport) -> discord.Embed:
     if report.detail_step:
         step = report.detail_step
         icon = "✅" if step.passed else "❌"
-        value = f"{step.info}" if step.passed else f"⚠️ **Error:** `{step.error}`"
+        value = f"{step.info}" if step.passed else f"⚠️ **Failed:**\n{_format_error(step.error)}"
         embed.add_field(
             name=f"{icon} Step 2: Details & List ({step.duration_ms}ms)",
             value=value,
@@ -58,7 +66,7 @@ def create_test_report_embed(report: TestReport) -> discord.Embed:
             elif report.novel_snippet:
                 lines.append(f"\n📖 **Preview:**\n> {report.novel_snippet}...")
         else:
-            lines.append(f"⚠️ **Error:** `{step.error}`")
+            lines.append(f"⚠️ **Failed:**\n{_format_error(step.error)}")
 
         embed.add_field(
             name=f"{icon} Step 3: Content Extraction ({step.duration_ms}ms)",
