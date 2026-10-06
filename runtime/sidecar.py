@@ -59,6 +59,7 @@ class SidecarBridge:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=32 * 1024 * 1024,  # 32 MB line buffer for long episode lists (One Piece, Conan)
             )
 
             ready_event = asyncio.Event()
@@ -112,7 +113,7 @@ class SidecarBridge:
                     logger.debug(f"[Sidecar Raw Out] {line}")
             except Exception as e:
                 logger.error(f"Error in stdout loop: {e}")
-                break
+                await asyncio.sleep(0.1)
 
     async def _stderr_loop(self, ready_event: asyncio.Event):
         while self.process and self.process.stderr and not self.process.stderr.at_eof():
