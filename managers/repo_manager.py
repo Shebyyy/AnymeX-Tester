@@ -64,7 +64,6 @@ class RepoManager:
 
     async def add_repo(self, url: str, item_type: str, backend: str) -> Dict[str, Any]:
         url = url.strip()
-        # Clean URL if needed
         clean_url = url
         if not clean_url.endswith(".json") and not clean_url.endswith(".gz"):
             if not clean_url.endswith("/"):
@@ -80,11 +79,26 @@ class RepoManager:
             if not isinstance(item, dict):
                 continue
             name = item.get("name", "Unknown")
+            # Strip "Aniyomi: " or "Tachiyomi: " prefix for cleaner display
+            clean_name = name
+            if clean_name.startswith("Aniyomi: "):
+                clean_name = clean_name[9:]
+            elif clean_name.startswith("Tachiyomi: "):
+                clean_name = clean_name[11:]
+
             pkg = item.get("pkg", item.get("pkgName", item.get("id", "")))
             apk = item.get("apk", item.get("apkUrl", ""))
             version = str(item.get("version", "1.0.0"))
             lang = item.get("lang", "all")
-            is_nsfw = bool(item.get("isNsfw", False))
+            is_nsfw = bool(item.get("nsfw", item.get("isNsfw", False)))
+
+            # Extract numeric source ID from sources list (critical for Aniyomi)
+            sources = item.get("sources", [])
+            first_source_id = ""
+            if isinstance(sources, list) and len(sources) > 0 and isinstance(sources[0], dict):
+                first_source_id = str(sources[0].get("id", ""))
+            
+            source_id = first_source_id or str(item.get("id", pkg))
 
             icon = item.get("iconUrl", "")
             if not icon:
@@ -92,9 +106,17 @@ class RepoManager:
 
             apk_url = apk if apk.startswith("http") else f"{base_icon_url}/apk/{apk}" if apk else ""
 
+            # Detect item type accurately from pkg or type
+            detected_type = item_type.lower()
+            if ".animeextension." in pkg or ".anime." in pkg:
+                detected_type = "anime"
+            elif ".mangaextension." in pkg or ".manga." in pkg:
+                detected_type = "manga"
+
             source_entry = {
-                "id": str(item.get("id", pkg)),
-                "name": name,
+                "id": source_id,
+                "name": clean_name,
+                "rawName": name,
                 "pkg": pkg,
                 "version": version,
                 "lang": lang,
@@ -102,7 +124,7 @@ class RepoManager:
                 "icon": icon,
                 "apkUrl": apk_url,
                 "backend": backend.lower(),
-                "itemType": item_type.lower(),
+                "itemType": detected_type,
                 "repoUrl": url
             }
             parsed_sources.append(source_entry)
@@ -149,57 +171,80 @@ class RepoManager:
     def find_extension(self, query: str) -> Optional[Dict[str, Any]]:
         query_lower = query.lower().strip()
         all_exts = self.get_all_extensions()
-        # Exact match on pkg or name
+        # Exact match on name, pkg, or id
         for ext in all_exts:
-            if ext.get("name", "").lower() == query_lower or ext.get("pkg", "").lower() == query_lower or ext.get("id", "").lower() == query_lower:
+            if (ext.get("name", "").lower() == query_lower or 
+                ext.get("pkg", "").lower() == query_lower or 
+                ext.get("id", "").lower() == query_lower or
+                ext.get("rawName", "").lower() == query_lower):
                 return ext
         # Partial match
         for ext in all_exts:
-            if query_lower in ext.get("name", "").lower() or query_lower in ext.get("pkg", "").lower():
+            if (query_lower in ext.get("name", "").lower() or 
+                query_lower in ext.get("pkg", "").lower() or
+                query_lower in ext.get("rawName", "").lower()):
                 return ext
         return None
 
     async def install_extension(self, ext: Dict[str, Any]) -> bool:
-        """Downloads APK/JAR and registers with sidecar if needed."""
+        """Downloads APK/JAR, converts to JAR if needed, and registers with sidecar."""
         backend = ext.get("backend", "")
         pkg = ext.get("pkg", "ext")
         apk_url = ext.get("apkUrl")
-
-        if not apk_url:
-            return True
 
         bridge = SidecarBridge()
         target_jar = os.path.join(self.ext_dir, f"{pkg}.jar")
 
         if os.path.exists(target_jar):
-            # Already installed/converted
-            await bridge.invoke_method("loadExtensions", {"folderPath": self.ext_dir})
+            # Already installed/converted -> reload into sidecar
+            loaded = await bridge.invoke_method("loadExtensions", {"folderPath": self.ext_dir})
+            self._sync_loaded_id(ext, loaded)
             return True
 
-        temp_apk = os.path.join(self.ext_dir, f"{pkg}.apk")
+        if not apk_url:
+            return False
+
+        temp_zip = os.path.join(self.ext_dir, f"{pkg}.zip")
         headers = {"User-Agent": "Mozilla/5.0"}
 
+        logger.info(f"Downloading APK for {ext.get('name')} from {apk_url}...")
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(apk_url) as resp:
                 if resp.status != 200:
                     raise RuntimeError(f"Failed to download extension APK: HTTP {resp.status}")
-                with open(temp_apk, "wb") as f:
+                with open(temp_zip, "wb") as f:
                     f.write(await resp.read())
 
         try:
-            # Delegate conversion to dex2jar via sidecar
-            logger.info(f"Converting APK {pkg} via sidecar...")
+            logger.info(f"Converting APK {pkg} to JAR via sidecar dex2jar...")
             await bridge.invoke_method("convertApk", {
-                "apkPath": temp_apk,
+                "apkPath": temp_zip,
                 "outJarPath": target_jar
             })
 
-            # Reload extensions
-            await bridge.invoke_method("loadExtensions", {"folderPath": self.ext_dir})
+            # Reload extensions in sidecar JVM
+            loaded = await bridge.invoke_method("loadExtensions", {"folderPath": self.ext_dir})
+            self._sync_loaded_id(ext, loaded)
             return True
         finally:
-            if os.path.exists(temp_apk):
+            if os.path.exists(temp_zip):
                 try:
-                    os.remove(temp_apk)
+                    os.remove(temp_zip)
                 except Exception:
                     pass
+
+    def _sync_loaded_id(self, ext: Dict[str, Any], loaded: Any):
+        """Syncs the exact numeric source ID from the JVM sidecar response."""
+        if not loaded or not isinstance(loaded, list):
+            return
+        pkg = ext.get("pkg", "").lower()
+        name = ext.get("name", "").lower()
+        for s in loaded:
+            s_pkg = s.get("pkgName", "").lower()
+            s_name = s.get("name", "").lower()
+            if s_pkg == pkg or s_name == name:
+                new_id = str(s.get("id"))
+                ext["id"] = new_id
+                logger.info(f"Updated extension '{ext.get('name')}' to JVM source ID: {new_id}")
+                self._save_repos()
+                break
