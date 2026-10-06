@@ -312,6 +312,45 @@ async def cmd_test_repo(interaction: discord.Interaction, url: str, query: str):
     summary_embed = create_batch_test_embed(matched_repo.get("url"), passed, failed, results)
     await progress.edit(content=None, embed=summary_embed)
 
+
+@bot.tree.command(name="clear_cache", description="Delete all downloaded & converted extension JARs to free disk space")
+@app_commands.describe(clear_repos="Also clear registered repositories list? (Default: False)")
+async def cmd_clear_cache(interaction: discord.Interaction, clear_repos: bool = False):
+    await interaction.response.defer()
+    ext_dir = os.path.abspath("data/extensions")
+    deleted_count = 0
+    freed_bytes = 0
+
+    if os.path.exists(ext_dir):
+        for f in os.listdir(ext_dir):
+            file_path = os.path.join(ext_dir, f)
+            if os.path.isfile(file_path):
+                try:
+                    freed_bytes += os.path.getsize(file_path)
+                    os.remove(file_path)
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Could not delete {file_path}: {e}")
+
+    try:
+        await bridge.invoke_method("loadExtensions", {"folderPath": ext_dir})
+    except Exception:
+        pass
+
+    msg = f"? Deleted `{deleted_count}` converted JARs\n? Freed `{freed_bytes / (1024*1024):.2f} MB` of disk space"
+
+    if clear_repos:
+        repo_mgr.repos.clear()
+        repo_mgr._save_repos()
+        msg += "\n? Registered repositories list has been reset."
+
+    embed = discord.Embed(
+        title="?? Storage Cache Cleaned",
+        description=msg,
+        color=0x2ECC71
+    )
+    await interaction.followup.send(embed=embed)
+
 async def main():
     if not DISCORD_TOKEN or DISCORD_TOKEN == "your_discord_bot_token_here":
         logger.warning("DISCORD_TOKEN is not set in .env! Please set your bot token.")
