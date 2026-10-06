@@ -238,6 +238,33 @@ async def cmd_test_extension(interaction: discord.Interaction, name: str, query:
         logger.error(f"Test failed with error: {e}", exc_info=True)
         await progress_msg.edit(content=f"❌ **Test Error:** `{e}`")
 
+
+@cmd_test_extension.autocomplete("name")
+async def autocomplete_extension_name(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    all_exts = repo_mgr.get_all_extensions()
+    choices = []
+    current_lower = current.lower() if current else ""
+    for ext in all_exts:
+        name = ext.get("name", "Unknown")
+        pkg = ext.get("pkg", "")
+        backend = ext.get("backend", "").upper()
+        lang = ext.get("lang", "all").upper()
+        repo_url = ext.get("repoUrl", "")
+
+        owner_info = ""
+        if "githubusercontent.com/" in repo_url or "github.com/" in repo_url:
+            parts = repo_url.replace("https://raw.githubusercontent.com/", "").replace("https://github.com/", "").split("/")
+            if len(parts) >= 2:
+                owner_info = f" ({parts[0]}/{parts[1]})"
+
+        display_label = f"{name} [{backend}] [{lang}]{owner_info}"[:100]
+
+        if not current_lower or current_lower in name.lower() or current_lower in pkg.lower() or current_lower in owner_info.lower():
+            choices.append(app_commands.Choice(name=display_label, value=name))
+            if len(choices) >= 25:
+                break
+    return choices
+
 @bot.tree.command(name="test_repo", description="Test all extensions in a repository")
 @app_commands.describe(
     url="Repository URL",

@@ -1,0 +1,65 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: 22
+          script: |
+            set -e
+            APP_DIR="/opt/anymex-tester"
+
+            # 1. Clone if not present, otherwise pull latest
+            if [ ! -d "$APP_DIR/.git" ]; then
+              mkdir -p "$APP_DIR"
+              git clone https://github.com/Shebyyy/AnymeX-Tester.git "$APP_DIR"
+            fi
+
+            cd "$APP_DIR"
+            git fetch origin main
+            git reset --hard origin/main
+
+            # 2. Configure .env from GitHub Secrets
+            cat << 'EOF' > .env
+            DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+            PORT=${{ secrets.PORT || '8088' }}
+            EOF
+
+            # 3. Install Python dependencies
+            python3 -m pip install --break-system-packages -r requirements.txt
+
+            # 4. Create systemd service
+            cat << 'EOF' > /etc/systemd/system/anymex-tester.service
+            [Unit]
+            Description=AnymeX Extension Testing Discord Bot
+            After=network.target
+
+            [Service]
+            Type=simple
+            User=root
+            WorkingDirectory=/opt/anymex-tester
+            ExecStart=/usr/bin/python3 /opt/anymex-tester/bot.py
+            Restart=always
+            RestartSec=5
+            EnvironmentFile=/opt/anymex-tester/.env
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            # 5. Reload and restart systemd service
+            systemctl daemon-reload
+            systemctl enable anymex-tester
+            systemctl restart anymex-tester
+            systemctl status anymex-tester --no-pager
