@@ -1,4 +1,4 @@
-﻿import discord
+import discord
 from typing import Any, Dict, List
 from tester.extension_tester import TestReport
 

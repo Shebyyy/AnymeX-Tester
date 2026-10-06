@@ -1,4 +1,4 @@
-﻿import os
+import os
 import shutil
 import urllib.request
 import logging

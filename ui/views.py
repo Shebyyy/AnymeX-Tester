@@ -1,4 +1,4 @@
-﻿import discord
+import discord
 from typing import Any, Callable, Dict, List, Optional
 
 class ExtensionSelectDropdown(discord.ui.Select):
