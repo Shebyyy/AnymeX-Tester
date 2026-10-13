@@ -1,5 +1,6 @@
 from typing import Optional, List, Dict, Any
 import asyncio
+import io
 import logging
 import os
 import sys
@@ -12,6 +13,7 @@ from discord.ext import commands
 
 from runtime.downloader import RuntimeDownloader
 from runtime.sidecar import SidecarBridge
+from runtime.log_manager import log_manager
 from managers.repo_manager import RepoManager
 from tester.extension_tester import ExtensionTester
 from ui.embeds import create_test_report_embed, create_repo_embed, create_batch_test_embed
@@ -227,16 +229,48 @@ async def cmd_test_extension(interaction: discord.Interaction, name: str, query:
 
     progress_msg = await interaction.followup.send(f"⏳ **Testing `{ext.get('name')}`...** Preparing extension and running pipeline...")
 
+    session = log_manager.start_session(f"{ext.get('name')} [{ext.get('pkg')}]")
+    session.add_line(f"Target: {ext.get('name')} (pkg={ext.get('pkg')}, backend={ext.get('backend')}, itemType={ext.get('itemType')})")
+    session.add_line(f"Search Query: '{query}'")
+
+    report = None
     try:
         # Prepare / install extension if APK
+        logger.info(f"Preparing extension {ext.get('name')}...")
         await repo_mgr.install_extension(ext)
         # Execute test
         report = await tester.run_test(ext, query)
         embed = create_test_report_embed(report)
-        await progress_msg.edit(content=None, embed=embed)
+
+        status_str = "PASSED" if report.overall_passed else "FAILED"
+        log_content = session.finish(status=status_str)
+        report.log_content = log_content
+
+        # Send full log file as attachment if it contains meaningful data (no empty or false logs)
+        if session.is_meaningful():
+            clean_pkg = ext.get('pkg', 'extension').replace('/', '_').replace('\\', '_')
+            log_file = discord.File(
+                fp=io.BytesIO(log_content.encode("utf-8")),
+                filename=f"{clean_pkg}_test.log"
+            )
+            await progress_msg.edit(content=None, embed=embed, attachments=[log_file])
+        else:
+            await progress_msg.edit(content=None, embed=embed)
+
     except Exception as e:
         logger.error(f"Test failed with error: {e}", exc_info=True)
-        await progress_msg.edit(content=f"❌ **Test Error:** `{e}`")
+        log_content = session.finish(status=f"ERROR: {e}")
+        if session.is_meaningful():
+            clean_pkg = ext.get('pkg', 'extension').replace('/', '_').replace('\\', '_')
+            log_file = discord.File(
+                fp=io.BytesIO(log_content.encode("utf-8")),
+                filename=f"{clean_pkg}_error.log"
+            )
+            await progress_msg.edit(content=f"❌ **Test Error:** `{e}`", attachments=[log_file])
+        else:
+            await progress_msg.edit(content=f"❌ **Test Error:** `{e}`")
+    finally:
+        log_manager.stop_session(session)
 
 
 @cmd_test_extension.autocomplete("name")
@@ -350,6 +384,21 @@ async def cmd_clear_cache(interaction: discord.Interaction, clear_repos: bool = 
         color=0x2ECC71
     )
     await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="logs", description="Export recent bot system and JVM sidecar runtime logs")
+@app_commands.describe(lines="Number of recent log lines to export (Default: 200)")
+async def cmd_logs(interaction: discord.Interaction, lines: int = 200):
+    await interaction.response.defer(ephemeral=True)
+    recent = log_manager.get_recent_logs(max_lines=lines)
+    if not recent or len(recent.strip()) < 20:
+        await interaction.followup.send("ℹ️ No logs currently available.", ephemeral=True)
+        return
+
+    log_file = discord.File(
+        fp=io.BytesIO(recent.encode("utf-8")),
+        filename="anymex_runtime.log"
+    )
+    await interaction.followup.send(content=f"📄 **Recent Runtime Logs** (last `{lines}` lines):", file=log_file, ephemeral=True)
 
 async def main():
     if not DISCORD_TOKEN or DISCORD_TOKEN == "your_discord_bot_token_here":

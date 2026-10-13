@@ -3,10 +3,11 @@ import collections
 import json
 import logging
 import os
-import subprocess
 from typing import Any, Dict, List, Optional
+from runtime.log_manager import log_manager
 
 logger = logging.getLogger("SidecarBridge")
+
 
 class SidecarBridge:
     _instance: Optional["SidecarBridge"] = None
@@ -26,7 +27,7 @@ class SidecarBridge:
         self._is_ready = False
         self._read_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
-        self._recent_logs: collections.deque = collections.deque(maxlen=150)
+        self._recent_logs: collections.deque = collections.deque(maxlen=200)
         self._initialized = True
 
     @property
@@ -59,7 +60,7 @@ class SidecarBridge:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=32 * 1024 * 1024,  # 32 MB line buffer for long episode lists (One Piece, Conan)
+                limit=32 * 1024 * 1024,  # 32 MB line buffer
             )
 
             ready_event = asyncio.Event()
@@ -67,7 +68,7 @@ class SidecarBridge:
             self._stderr_task = asyncio.create_task(self._stderr_loop(ready_event))
 
             try:
-                await asyncio.wait_for(ready_event.wait(), timeout=12.0)
+                await asyncio.wait_for(ready_event.wait(), timeout=20.0)
                 self._is_ready = True
                 logger.info("Sidecar process successfully started and ready!")
                 return True
@@ -93,23 +94,41 @@ class SidecarBridge:
 
                 try:
                     payload = json.loads(line)
-                    req_id = str(payload.get("id"))
+                    req_id = payload.get("id")
+                    if req_id is not None:
+                        req_id = str(req_id)
                     data = payload.get("data")
                     status = payload.get("status")
+                    raw_err = payload.get("error")
 
-                    if req_id in self._pending_requests:
+                    if req_id and req_id in self._pending_requests:
                         future = self._pending_requests.pop(req_id)
                         if not future.done():
-                            if status == "error":
+                            if status == "error" or raw_err:
+                                err_details = str(raw_err or data or "Unknown sidecar error")
                                 recent = self.get_recent_logs(8)
-                                err_details = str(data or "Unknown sidecar error")
                                 if recent:
                                     err_details += "\n" + "\n".join(recent[-5:])
                                 future.set_exception(RuntimeError(err_details))
                             else:
                                 future.set_result(data)
+                    elif raw_err and self._pending_requests:
+                        # JAR threw an unhandled exception without returning request id
+                        err_details = str(raw_err)
+                        recent = self.get_recent_logs(8)
+                        if recent:
+                            err_details += "\n" + "\n".join(recent[-5:])
+                        # Fail the oldest active request immediately to prevent fake timeouts
+                        first_key = next(iter(self._pending_requests))
+                        future = self._pending_requests.pop(first_key)
+                        if not future.done():
+                            future.set_exception(RuntimeError(err_details))
+                    else:
+                        # Non-request JSON output from JAR
+                        log_manager.record_jar_log(line, is_stderr=False)
                 except json.JSONDecodeError:
                     self._recent_logs.append(f"[OUT] {line}")
+                    log_manager.record_jar_log(line, is_stderr=False)
                     logger.debug(f"[Sidecar Raw Out] {line}")
             except Exception as e:
                 logger.error(f"Error in stdout loop: {e}")
@@ -126,6 +145,7 @@ class SidecarBridge:
                     continue
 
                 self._recent_logs.append(line)
+                log_manager.record_jar_log(line, is_stderr=True)
                 logger.debug(f"[Sidecar Log] {line}")
                 if "AnymeX Sidecar Process Started" in line or "Started" in line:
                     ready_event.set()
@@ -151,6 +171,7 @@ class SidecarBridge:
             "id": req_id,
         }
 
+        logger.info(f"RPC -> {method} (id={req_id})")
         encoded = (json.dumps(message) + "\n").encode("utf-8")
         if self.process and self.process.stdin:
             self.process.stdin.write(encoded)
@@ -163,6 +184,15 @@ class SidecarBridge:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending_requests.pop(req_id, None)
+            # Send cancel to JVM sidecar to release hung OkHttp calls / threads
+            try:
+                if self.process and self.process.stdin:
+                    cancel_msg = (json.dumps({"method": "cancel", "args": {"id": req_id}}) + "\n").encode("utf-8")
+                    self.process.stdin.write(cancel_msg)
+                    await self.process.stdin.drain()
+            except Exception:
+                pass
+
             recent = self.get_recent_logs(8)
             err_msg = f"JAR method '{method}' timed out after {timeout}s"
             if recent:

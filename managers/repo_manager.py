@@ -197,6 +197,7 @@ class RepoManager:
 
         if os.path.exists(target_jar):
             # Already installed/converted -> reload into sidecar
+            logger.info(f"Extension JAR already cached at {target_jar}, reloading into sidecar...")
             loaded = await bridge.invoke_method("loadExtensions", {"folderPath": self.ext_dir})
             self._sync_loaded_id(ext, loaded)
             return True
