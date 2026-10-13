@@ -249,3 +249,28 @@ class RepoManager:
                 logger.info(f"Updated extension '{ext.get('name')}' to JVM source ID: {new_id}")
                 self._save_repos()
                 break
+
+    async def cleanup_extension(self, ext: Dict[str, Any]):
+        """Deletes the downloaded/converted JAR and temp files for this extension after testing."""
+        pkg = ext.get("pkg", "")
+        if not pkg:
+            return
+        target_jar = os.path.join(self.ext_dir, f"{pkg}.jar")
+        temp_zip = os.path.join(self.ext_dir, f"{pkg}.zip")
+
+        for p in [target_jar, temp_zip]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    logger.info(f"Cleaned up temporary extension file: {p}")
+                except Exception as e:
+                    logger.warning(f"Could not remove {p}: {e}")
+
+        # Tell sidecar to unload extension from JVM memory
+        bridge = SidecarBridge()
+        source_id = str(ext.get("id", ""))
+        if source_id and bridge.is_running:
+            try:
+                await bridge.invoke_method("unloadExtension", {"sourceId": source_id})
+            except Exception:
+                pass

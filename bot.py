@@ -229,6 +229,12 @@ async def cmd_test_extension(interaction: discord.Interaction, name: str, query:
 
     progress_msg = await interaction.followup.send(f"⏳ **Testing `{ext.get('name')}`...** Preparing extension and running pipeline...")
 
+    # Auto-check for updates to the desktop runtime plugin JAR before running test
+    try:
+        await downloader.auto_update_runtime(bridge=bridge)
+    except Exception as e:
+        logger.warning(f"Runtime auto-update check encountered warning: {e}")
+
     session = log_manager.start_session(f"{ext.get('name')} [{ext.get('pkg')}]")
     session.add_line(f"Target: {ext.get('name')} (pkg={ext.get('pkg')}, backend={ext.get('backend')}, itemType={ext.get('itemType')})")
     session.add_line(f"Search Query: '{query}'")
@@ -249,11 +255,13 @@ async def cmd_test_extension(interaction: discord.Interaction, name: str, query:
         # Send full log file as attachment if it contains meaningful data (no empty or false logs)
         if session.is_meaningful():
             clean_pkg = ext.get('pkg', 'extension').replace('/', '_').replace('\\', '_')
+            log_bytes = io.BytesIO(log_content.encode("utf-8"))
             log_file = discord.File(
-                fp=io.BytesIO(log_content.encode("utf-8")),
+                fp=log_bytes,
                 filename=f"{clean_pkg}_test.log"
             )
             await progress_msg.edit(content=None, embed=embed, attachments=[log_file])
+            log_bytes.close()
         else:
             await progress_msg.edit(content=None, embed=embed)
 
@@ -262,15 +270,22 @@ async def cmd_test_extension(interaction: discord.Interaction, name: str, query:
         log_content = session.finish(status=f"ERROR: {e}")
         if session.is_meaningful():
             clean_pkg = ext.get('pkg', 'extension').replace('/', '_').replace('\\', '_')
+            log_bytes = io.BytesIO(log_content.encode("utf-8"))
             log_file = discord.File(
-                fp=io.BytesIO(log_content.encode("utf-8")),
+                fp=log_bytes,
                 filename=f"{clean_pkg}_error.log"
             )
             await progress_msg.edit(content=f"❌ **Test Error:** `{e}`", attachments=[log_file])
+            log_bytes.close()
         else:
             await progress_msg.edit(content=f"❌ **Test Error:** `{e}`")
     finally:
         log_manager.stop_session(session)
+        # Immediately delete the downloaded/converted extension APK/JAR from VPS storage
+        try:
+            await repo_mgr.cleanup_extension(ext)
+        except Exception as e:
+            logger.warning(f"Error during extension cleanup: {e}")
 
 
 @cmd_test_extension.autocomplete("name")
@@ -321,6 +336,11 @@ async def cmd_test_repo(interaction: discord.Interaction, url: str, query: str):
 
     progress = await interaction.followup.send(f"⏳ Starting batch test of `{len(extensions)}` extensions from `{matched_repo.get('url')}`...")
 
+    try:
+        await downloader.auto_update_runtime(bridge=bridge)
+    except Exception as e:
+        logger.warning(f"Runtime auto-update check encountered warning: {e}")
+
     results = []
     passed = 0
     failed = 0
@@ -336,6 +356,11 @@ async def cmd_test_repo(interaction: discord.Interaction, url: str, query: str):
                 failed += 1
         except Exception as e:
             failed += 1
+        finally:
+            try:
+                await repo_mgr.cleanup_extension(ext)
+            except Exception:
+                pass
 
         if (i + 1) % 5 == 0 or (i + 1) == len(extensions):
             try:
